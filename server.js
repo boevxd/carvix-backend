@@ -524,6 +524,18 @@ app.post('/api/feedback/cleanup-orphans', auth, async (req, res) => {
   }
 });
 
+app.get('/api/feedback/unread', auth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM mekhanik_feedback WHERE komu_id = $1 AND prochitano = FALSE',
+      [req.user.userId]
+    );
+    res.json({ count: r.rows[0].count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/feedback/conversations', auth, async (req, res) => {
   try {
     const me = req.user.userId;
