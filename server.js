@@ -1,0 +1,109 @@
+const express = require('express');
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const pool = new Pool({
+  connectionString: 'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a.oregon-postgres.render.com/carvix',
+  ssl: { rejectUnauthorized: false }
+});
+
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        login VARCHAR(100) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('Database initialized');
+  } catch (e) {
+    console.error('DB init error:', e.message);
+  }
+}
+initDB();
+
+app.post('/api/register', async (req, res) => {
+  const { fullName, login, password } = req.body;
+  if (!fullName || !login || !password) {
+    return res.status(400).json({ error: 'All fields required' });
+  }
+  try {
+    const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Login already taken' });
+    }
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      'INSERT INTO users (full_name, login, password_hash) VALUES ($1, $2, $3)',
+      [fullName, login, hash]
+    );
+    res.json({ success: true, message: 'User registered' });
+  } catch (e) {
+    console.error('Register error:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  const { login, password } = req.body;
+  if (!login || !password) {
+    return res.status(400).json({ error: 'Login and password required' });
+  }
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    const token = jwt.sign(
+      { userId: user.id, login: user.login },
+      'carvix_secret_key_2024',
+      { expiresIn: '7d' }
+    );
+    res.json({
+      success: true,
+      token,
+      user: { fullName: user.full_name, login: user.login }
+    });
+  } catch (e) {
+    console.error('Login error:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/me', async (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const token = auth.replace('Bearer ', '');
+    const decoded = jwt.verify(token, 'carvix_secret_key_2024');
+    const result = await pool.query(
+      'SELECT full_name, login FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    res.json({ user: result.rows[0] });
+  } catch (e) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Carvix API running on port ${PORT}`));
