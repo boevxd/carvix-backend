@@ -137,22 +137,29 @@ app.get('/api/debug/tables', async (req, res) => {
 
 app.get('/api/debug/schema', async (req, res) => {
   try {
-    const usersSchema = await pool.query(`
-      SELECT column_name, data_type
-      FROM information_schema.columns
-      WHERE table_name = 'users' AND table_schema = 'public'
-      ORDER BY ordinal_position
-    `);
-    const sotrudnikSchema = await pool.query(`
-      SELECT column_name, data_type
-      FROM information_schema.columns
-      WHERE table_name = 'sotrudnik' AND table_schema = 'public'
-      ORDER BY ordinal_position
-    `);
-    res.json({
-      users: usersSchema.rows,
-      sotrudnik: sotrudnikSchema.rows
-    });
+    const tables = ['users','sotrudnik','rol','podrazdelenie','zayavka','remont','transportnoe_sredstvo','marka','model','status','tip_remonta','zapchast','remont_normy','tarif_rabot'];
+    const result = {};
+    for (const t of tables) {
+      const q = await pool.query(`
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_name = $1 AND table_schema = 'public'
+        ORDER BY ordinal_position
+      `, [t]);
+      result[t] = q.rows;
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/debug/sample/:table', async (req, res) => {
+  try {
+    const allowed = ['rol','status','tip_remonta','podrazdelenie','marka','model','transportnoe_sredstvo','zayavka','remont'];
+    if (!allowed.includes(req.params.table)) return res.status(400).json({ error: 'not allowed' });
+    const r = await pool.query(`SELECT * FROM ${req.params.table} LIMIT 5`);
+    res.json({ rows: r.rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
