@@ -47,11 +47,12 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Login already taken' });
     }
     const hash = await bcrypt.hash(password, 10);
-    await pool.query(
-      'INSERT INTO users (full_name, login, password_hash) VALUES ($1, $2, $3)',
+    const insertRes = await pool.query(
+      'INSERT INTO users (full_name, login, password_hash) VALUES ($1, $2, $3) RETURNING id',
       [fullName, login, hash]
     );
-    res.json({ success: true, message: 'User registered' });
+    console.log('User registered id:', insertRes.rows[0]?.id);
+    res.json({ success: true, message: 'User registered', id: insertRes.rows[0]?.id });
   } catch (e) {
     console.error('Register error:', e);
     res.status(500).json({ error: 'Server error' });
@@ -65,13 +66,18 @@ app.post('/api/login', async (req, res) => {
   }
   try {
     const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    console.log('Login query rows:', result.rows.length);
     if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'Invalid credentials' });
+      return res.status(400).json({ error: 'Invalid credentials (user not found)' });
     }
     const user = result.rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
+    let valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid && password === user.password_hash) {
+      valid = true; // fallback for old plaintext passwords
+    }
+    console.log('Password check valid:', valid, 'hash starts with:', user.password_hash?.substring(0,7));
     if (!valid) {
-      return res.status(400).json({ error: 'Invalid credentials' });
+      return res.status(400).json({ error: 'Invalid credentials (wrong password)' });
     }
     const token = jwt.sign(
       { userId: user.id, login: user.login },
@@ -107,6 +113,15 @@ app.get('/api/me', async (req, res) => {
     res.json({ user: result.rows[0] });
   } catch (e) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+app.get('/api/debug/users', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, login, full_name, created_at FROM users ORDER BY id DESC LIMIT 10');
+    res.json({ count: result.rows.length, users: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
