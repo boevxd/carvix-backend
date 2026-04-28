@@ -468,7 +468,7 @@ app.get('/api/sotrudniki/mekhaniki/active', auth, requireRole(ROLE_HEAD_MECHANIC
   try {
     const r = await pool.query(`
       SELECT s.id, s.fio, s.login,
-        (SELECT COUNT(*) FROM remont rm
+        (SELECT COUNT(*)::int FROM remont rm
           JOIN zayavka z ON z.id = rm.zayavka_id
           WHERE rm.mekhanik_id = s.id AND z.status_id = $1) AS active_remonts,
         (SELECT json_agg(json_build_object('zayavka_id', z.id, 'opisanie', z.opisanie, 'gos_nomer', ts.gos_nomer))
@@ -633,7 +633,7 @@ app.get('/api/feedback/conversations', auth, async (req, res) => {
         (SELECT data_sozdaniya FROM mekhanik_feedback m
           WHERE (m.ot_sotrudnika_id = $1 AND m.komu_id = s.id) OR (m.ot_sotrudnika_id = s.id AND m.komu_id = $1)
           ORDER BY m.data_sozdaniya DESC LIMIT 1) AS last_time,
-        (SELECT COUNT(*) FROM mekhanik_feedback m
+        (SELECT COUNT(*)::int FROM mekhanik_feedback m
           WHERE m.ot_sotrudnika_id = s.id AND m.komu_id = $1 AND m.prochitano = FALSE) AS unread
       FROM partners p
       JOIN sotrudnik s ON s.id = p.uid
