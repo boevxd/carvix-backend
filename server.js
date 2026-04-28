@@ -14,7 +14,7 @@ app.use((req, res, next) => {
 });
 
 const DB_URL = process.env.DATABASE_URL ||
-  'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a.oregon-postgres.render.com/carvix';
+  'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a/carvix';
 
 console.log('Connecting to DB:', DB_URL.replace(/:([^@]+)@/, ':***@'));
 
@@ -118,6 +118,20 @@ app.get('/api/me', async (req, res) => {
     res.json({ user: result.rows[0] });
   } catch (e) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+app.get('/api/debug/tables', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      ORDER BY table_name
+    `);
+    res.json({ tables: result.rows.map(r => r.table_name) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
