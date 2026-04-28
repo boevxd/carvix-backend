@@ -51,9 +51,17 @@ async function initDB() {
       )
     `);
     console.log('mekhanik_feedback table ready');
-    // Cleanup orphan broadcast messages (komu_id IS NULL) — they leaked across users.
-    const cleanup = await pool.query('DELETE FROM mekhanik_feedback WHERE komu_id IS NULL');
-    if (cleanup.rowCount > 0) console.log(`Removed ${cleanup.rowCount} orphan broadcast messages`);
+
+    // ---- Migrations system ----
+    await pool.query('CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)');
+
+    // One-time: wipe all feedback messages (privacy leak fix 2025-04-28)
+    const reset = await pool.query("SELECT 1 FROM _migrations WHERE name = 'reset_feedback_v2'");
+    if (reset.rowCount === 0) {
+      await pool.query('TRUNCATE TABLE mekhanik_feedback RESTART IDENTITY');
+      await pool.query("INSERT INTO _migrations(name) VALUES ('reset_feedback_v2')");
+      console.log('[migration] mekhanik_feedback wiped clean');
+    }
   } catch (e) {
     console.error('DB init error:', e.message);
   }
