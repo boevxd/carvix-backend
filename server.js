@@ -51,6 +51,9 @@ async function initDB() {
       )
     `);
     console.log('mekhanik_feedback table ready');
+    // Cleanup orphan broadcast messages (komu_id IS NULL) — they leaked across users.
+    const cleanup = await pool.query('DELETE FROM mekhanik_feedback WHERE komu_id IS NULL');
+    if (cleanup.rowCount > 0) console.log(`Removed ${cleanup.rowCount} orphan broadcast messages`);
   } catch (e) {
     console.error('DB init error:', e.message);
   }
@@ -467,7 +470,7 @@ app.get('/api/feedback', auth, async (req, res) => {
       FROM mekhanik_feedback f
       LEFT JOIN sotrudnik ot ON ot.id = f.ot_sotrudnika_id
       LEFT JOIN sotrudnik komu ON komu.id = f.komu_id
-      WHERE f.komu_id = $1 OR f.ot_sotrudnika_id = $1 OR f.komu_id IS NULL
+      WHERE f.komu_id = $1 OR f.ot_sotrudnika_id = $1
       ORDER BY f.data_sozdaniya DESC LIMIT 100
     `, [req.user.userId]);
     res.json({ messages: r.rows });
@@ -482,15 +485,32 @@ app.post('/api/feedback', auth, async (req, res) => {
   try {
     let recipientId = komu_id;
     if (!recipientId) {
-      // механик пишет — отправляем главмеху
+      // если получатель не указан — отправляем первому главмеху
       const gm = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = $1 LIMIT 1', [ROLE_HEAD_MECHANIC]);
       recipientId = gm.rows[0]?.id || null;
+    }
+    if (!recipientId) {
+      return res.status(400).json({ error: 'Получатель не определён. Укажите komu_id.' });
+    }
+    if (recipientId === req.user.userId) {
+      return res.status(400).json({ error: 'Нельзя отправить сообщение самому себе' });
     }
     await pool.query(
       'INSERT INTO mekhanik_feedback (ot_sotrudnika_id, komu_id, zayavka_id, soobshenie) VALUES ($1,$2,$3,$4)',
       [req.user.userId, recipientId, zayavka_id || null, soobshenie]
     );
     res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Удалить broadcast-сообщения с пустым получателем (старая утечка)
+app.post('/api/feedback/cleanup-orphans', auth, async (req, res) => {
+  try {
+    if (req.user.rol_id !== 5) return res.status(403).json({ error: 'forbidden' });
+    const r = await pool.query('DELETE FROM mekhanik_feedback WHERE komu_id IS NULL RETURNING id');
+    res.json({ deleted: r.rowCount });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
