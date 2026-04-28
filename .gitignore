@@ -1,0 +1,50 @@
+# Android Studio / Gradle
+*.iml
+.gradle
+.kotlin/
+/local.properties
+local.properties
+.DS_Store
+/build
+**/build/
+/captures
+.externalNativeBuild
+.cxx
+
+# IDE
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/deploymentTargetSelector.xml
+/.idea/deploymentTargetDropDown.xml
+/.idea/misc.xml
+/.idea/compiler.xml
+/.idea/jarRepositories.xml
+/.idea/runConfigurations.xml
+
+# Signing / secrets — НИКОГДА не коммитить!
+*.jks
+*.keystore
+keystore.properties
+key.properties
+
+# Build outputs
+/app/release/
+/app/debug/
+*.apk
+*.aab
+
+# Backend (Node.js)
+backend/node_modules/
+backend/.env
+backend/*.log
+backend/database.sqlite
+backend/db.sqlite
+backend/uploads/
+
+# Logs / тестовые файлы
+*.log
+test_*.json

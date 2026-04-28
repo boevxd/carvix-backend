@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Основная тема приложения (применяется после сплеша) -->
+    <style name="Theme.Carvix" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/carvix_bg</item>
+        <item name="android:statusBarColor">@color/carvix_bg</item>
+        <item name="android:navigationBarColor">@color/carvix_bg</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
+    </style>
+
+    <!--
+        Splash screen theme.
+        Используется только для launcher-активности.
+        После старта Activity вызываем installSplashScreen() и подменяем тему на Theme.Carvix.
+    -->
+    <style name="Theme.Carvix.Splash" parent="Theme.SplashScreen">
+        <!-- Цвет фона splash-экрана -->
+        <item name="windowSplashScreenBackground">@color/carvix_bg_dark</item>
+        <!-- Иконка машинки в центре -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+        <!-- Длительность анимации (мс) -->
+        <item name="windowSplashScreenAnimationDuration">300</item>
+        <!-- Тема, в которую переключаемся после сплеша -->
+        <item name="postSplashScreenTheme">@style/Theme.Carvix</item>
+    </style>
+</resources>
