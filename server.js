@@ -569,6 +569,27 @@ app.get('/api/feedback/conversations', auth, async (req, res) => {
   }
 });
 
+// Удалить весь диалог с конкретным пользователем (только для главмеха/админа)
+app.delete('/api/feedback/with/:userId', auth, async (req, res) => {
+  try {
+    const role = req.user.rolId;
+    if (role !== 4 && role !== 5) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const me = req.user.userId;
+    const other = parseInt(req.params.userId);
+    const r = await pool.query(
+      `DELETE FROM mekhanik_feedback
+       WHERE (ot_sotrudnika_id = $1 AND komu_id = $2)
+          OR (ot_sotrudnika_id = $2 AND komu_id = $1)`,
+      [me, other]
+    );
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/feedback/with/:userId', auth, async (req, res) => {
   try {
     const me = req.user.userId;
