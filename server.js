@@ -181,7 +181,7 @@ app.get('/api/refs', auth, async (req, res) => {
 // Список заявок с фильтрами
 app.get('/api/zayavki', auth, async (req, res) => {
   try {
-    const { status, mine } = req.query;
+    const { status, mine, available } = req.query;
     let where = [];
     let params = [];
     if (status) { params.push(parseInt(status)); where.push(`z.status_id = $${params.length}`); }
@@ -189,6 +189,12 @@ app.get('/api/zayavki', auth, async (req, res) => {
       // только заявки в которых текущий механик участвует
       params.push(req.user.userId);
       where.push(`EXISTS (SELECT 1 FROM remont rm WHERE rm.zayavka_id = z.id AND rm.mekhanik_id = $${params.length})`);
+    }
+    if (available === '1') {
+      // Свободные новые заявки + те, в которых текущий механик уже участвует
+      params.push(req.user.userId);
+      where.push(`(z.status_id = ${STATUS_NEW}
+        OR EXISTS (SELECT 1 FROM remont rm WHERE rm.zayavka_id = z.id AND rm.mekhanik_id = $${params.length}))`);
     }
     const sql = `
       SELECT z.*, st.nazvanie AS status_name, tr.nazvanie AS tip_remonta_name,
@@ -287,32 +293,69 @@ app.delete('/api/zayavki/:id', auth, requireRole(ROLE_ADMIN), async (req, res) =
   }
 });
 
-// Механик берёт заявку: создаёт remont, статус -> В работе
+// Механик берёт заявку: создаёт remont, статус -> В работе. С транзакцией от race-condition.
 app.post('/api/zayavki/:id/take', auth, requireRole(ROLE_MECHANIC, ROLE_HEAD_MECHANIC), async (req, res) => {
+  const client = await pool.connect();
   try {
-    const zr = await pool.query('SELECT * FROM zayavka WHERE id = $1', [req.params.id]);
-    if (!zr.rows.length) return res.status(404).json({ error: 'Not found' });
-    if (zr.rows[0].status_id !== STATUS_NEW) return res.status(400).json({ error: 'Заявка уже взята или закрыта' });
-    // ищем главмеха в том же подразделении (или любого)
-    const gm = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = $1 LIMIT 1', [ROLE_HEAD_MECHANIC]);
+    await client.query('BEGIN');
+    // Блокируем строку чтобы два механика не взяли одновременно
+    const zr = await client.query('SELECT * FROM zayavka WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (!zr.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found' });
+    }
+    if (zr.rows[0].status_id !== STATUS_NEW) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Заявка уже взята или закрыта' });
+    }
+    // На всякий случай: проверка что нет открытого remont
+    const existing = await client.query(
+      'SELECT 1 FROM remont WHERE zayavka_id = $1 AND data_okonchaniya IS NULL',
+      [req.params.id]
+    );
+    if (existing.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Заявка уже находится в ремонте' });
+    }
+    const gm = await client.query('SELECT id FROM sotrudnik WHERE rol_id = $1 LIMIT 1', [ROLE_HEAD_MECHANIC]);
     const gmId = gm.rows[0]?.id || null;
-    await pool.query(`
+    await client.query(`
       INSERT INTO remont (zayavka_id, data_nachala, mekhanik_id, glavniy_mekhanik_id, stoimost_rabot, stoimost_zapchastey)
       VALUES ($1, NOW(), $2, $3, 0, 0)
     `, [req.params.id, req.user.userId, gmId]);
-    await pool.query('UPDATE zayavka SET status_id = $1 WHERE id = $2', [STATUS_IN_PROGRESS, req.params.id]);
+    await client.query('UPDATE zayavka SET status_id = $1 WHERE id = $2', [STATUS_IN_PROGRESS, req.params.id]);
+    // Авто-обновление состояния ТС: "В ремонте"
+    await client.query(
+      `UPDATE transportnoe_sredstvo SET tekuschee_sostoyanie = 'В ремонте'
+       WHERE id = (SELECT ts_id FROM zayavka WHERE id = $1)`,
+      [req.params.id]
+    );
+    await client.query('COMMIT');
     res.json({ success: true });
   } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error(e);
     res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
-// Изменить статус заявки (механик)
-app.post('/api/zayavki/:id/status', auth, async (req, res) => {
+// Изменить статус заявки (механик-исполнитель / главмех / админ)
+app.post('/api/zayavki/:id/status', auth, requireRole(ROLE_MECHANIC, ROLE_HEAD_MECHANIC, ROLE_ADMIN), async (req, res) => {
   const { status_id, kommentariy, itog, stoimost_rabot, stoimost_zapchastey } = req.body;
   if (!status_id) return res.status(400).json({ error: 'status_id required' });
   try {
+    // Проверяем — если обычный механик, то он должен быть исполнителем
+    if (req.user.rolId === ROLE_MECHANIC) {
+      const rm = await pool.query(
+        'SELECT mekhanik_id FROM remont WHERE zayavka_id = $1 AND data_okonchaniya IS NULL ORDER BY id DESC LIMIT 1',
+        [req.params.id]
+      );
+      if (!rm.rows.length || rm.rows[0].mekhanik_id !== req.user.userId) {
+        return res.status(403).json({ error: 'Только исполнитель может менять статус' });
+      }
+    }
     await pool.query('UPDATE zayavka SET status_id = $1 WHERE id = $2', [status_id, req.params.id]);
     if (status_id === STATUS_DONE || status_id === STATUS_REJECTED) {
       await pool.query(`
@@ -325,6 +368,26 @@ app.post('/api/zayavki/:id/status', auth, async (req, res) => {
       `, [kommentariy, itog, stoimost_rabot, stoimost_zapchastey, req.params.id]);
     } else if (kommentariy) {
       await pool.query('UPDATE remont SET kommentariy = $1 WHERE zayavka_id = $2 AND data_okonchaniya IS NULL', [kommentariy, req.params.id]);
+    }
+    // Авто-обновление состояния ТС
+    if (status_id === STATUS_DONE) {
+      await pool.query(
+        `UPDATE transportnoe_sredstvo SET tekuschee_sostoyanie = 'Исправно'
+         WHERE id = (SELECT ts_id FROM zayavka WHERE id = $1)`,
+        [req.params.id]
+      );
+    } else if (status_id === STATUS_REJECTED) {
+      await pool.query(
+        `UPDATE transportnoe_sredstvo SET tekuschee_sostoyanie = 'Требует ремонта'
+         WHERE id = (SELECT ts_id FROM zayavka WHERE id = $1)`,
+        [req.params.id]
+      );
+    } else if (status_id === STATUS_WAIT_PARTS) {
+      await pool.query(
+        `UPDATE transportnoe_sredstvo SET tekuschee_sostoyanie = 'Ожидание запчастей'
+         WHERE id = (SELECT ts_id FROM zayavka WHERE id = $1)`,
+        [req.params.id]
+      );
     }
     res.json({ success: true });
   } catch (e) {
@@ -462,11 +525,28 @@ app.put('/api/sotrudniki/:id', auth, requireRole(ROLE_ADMIN), async (req, res) =
 });
 
 app.delete('/api/sotrudniki/:id', auth, requireRole(ROLE_ADMIN), async (req, res) => {
+  const client = await pool.connect();
   try {
-    await pool.query('DELETE FROM sotrudnik WHERE id = $1', [req.params.id]);
+    const id = parseInt(req.params.id);
+    if (id === req.user.userId) {
+      return res.status(400).json({ error: 'Нельзя удалить самого себя' });
+    }
+    await client.query('BEGIN');
+    // Каскадно удаляем зависимости (в БД нет ON DELETE CASCADE на sotrudnik FK)
+    await client.query('DELETE FROM mekhanik_feedback WHERE ot_sotrudnika_id = $1 OR komu_id = $1', [id]);
+    await client.query('UPDATE remont SET mekhanik_id = NULL WHERE mekhanik_id = $1', [id]);
+    await client.query('UPDATE remont SET glavniy_mekhanik_id = NULL WHERE glavniy_mekhanik_id = $1', [id]);
+    // Заявки, созданные этим сотрудником, оставляем (sozdatel_id допускает NULL? если нет — тоже NULLify)
+    await client.query('UPDATE zayavka SET sozdatel_id = NULL WHERE sozdatel_id = $1', [id]).catch(() => {});
+    await client.query('DELETE FROM sotrudnik WHERE id = $1', [id]);
+    await client.query('COMMIT');
     res.json({ success: true });
   } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Delete sotrudnik:', e);
     res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -514,9 +594,8 @@ app.post('/api/feedback', auth, async (req, res) => {
 });
 
 // Удалить broadcast-сообщения с пустым получателем (старая утечка)
-app.post('/api/feedback/cleanup-orphans', auth, async (req, res) => {
+app.post('/api/feedback/cleanup-orphans', auth, requireRole(ROLE_ADMIN), async (req, res) => {
   try {
-    if (req.user.rol_id !== 5) return res.status(403).json({ error: 'forbidden' });
     const r = await pool.query('DELETE FROM mekhanik_feedback WHERE komu_id IS NULL RETURNING id');
     res.json({ deleted: r.rowCount });
   } catch (e) {
