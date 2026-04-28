@@ -496,6 +496,60 @@ app.post('/api/feedback', auth, async (req, res) => {
   }
 });
 
+app.get('/api/feedback/conversations', auth, async (req, res) => {
+  try {
+    const me = req.user.userId;
+    // Все люди с которыми были диалоги
+    const r = await pool.query(`
+      WITH partners AS (
+        SELECT DISTINCT
+          CASE WHEN ot_sotrudnika_id = $1 THEN komu_id ELSE ot_sotrudnika_id END AS uid
+        FROM mekhanik_feedback
+        WHERE (ot_sotrudnika_id = $1 OR komu_id = $1)
+      )
+      SELECT s.id, s.fio, s.login, s.rol_id, r.nazvanie AS rol_name,
+        (SELECT soobshenie FROM mekhanik_feedback m
+          WHERE (m.ot_sotrudnika_id = $1 AND m.komu_id = s.id) OR (m.ot_sotrudnika_id = s.id AND m.komu_id = $1)
+          ORDER BY m.data_sozdaniya DESC LIMIT 1) AS last_message,
+        (SELECT data_sozdaniya FROM mekhanik_feedback m
+          WHERE (m.ot_sotrudnika_id = $1 AND m.komu_id = s.id) OR (m.ot_sotrudnika_id = s.id AND m.komu_id = $1)
+          ORDER BY m.data_sozdaniya DESC LIMIT 1) AS last_time,
+        (SELECT COUNT(*) FROM mekhanik_feedback m
+          WHERE m.ot_sotrudnika_id = s.id AND m.komu_id = $1 AND m.prochitano = FALSE) AS unread
+      FROM partners p
+      JOIN sotrudnik s ON s.id = p.uid
+      LEFT JOIN rol r ON r.id = s.rol_id
+      WHERE s.id IS NOT NULL
+      ORDER BY last_time DESC NULLS LAST
+    `, [me]);
+    res.json({ conversations: r.rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/feedback/with/:userId', auth, async (req, res) => {
+  try {
+    const me = req.user.userId;
+    const other = parseInt(req.params.userId);
+    const r = await pool.query(`
+      SELECT f.*, ot.fio AS ot_fio, komu.fio AS komu_fio
+      FROM mekhanik_feedback f
+      LEFT JOIN sotrudnik ot ON ot.id = f.ot_sotrudnika_id
+      LEFT JOIN sotrudnik komu ON komu.id = f.komu_id
+      WHERE (f.ot_sotrudnika_id = $1 AND f.komu_id = $2)
+         OR (f.ot_sotrudnika_id = $2 AND f.komu_id = $1)
+      ORDER BY f.data_sozdaniya ASC
+    `, [me, other]);
+    // отметить как прочитанные входящие
+    await pool.query('UPDATE mekhanik_feedback SET prochitano = TRUE WHERE komu_id = $1 AND ot_sotrudnika_id = $2', [me, other]);
+    res.json({ messages: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/feedback/:id/read', auth, async (req, res) => {
   try {
     await pool.query('UPDATE mekhanik_feedback SET prochitano = TRUE WHERE id = $1 AND komu_id = $2', [req.params.id, req.user.userId]);
