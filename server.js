@@ -8,6 +8,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.path}`, req.body);
+  next();
+});
+
 const pool = new Pool({
   connectionString: 'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a.oregon-postgres.render.com/carvix',
   ssl: { rejectUnauthorized: false }
@@ -102,6 +107,15 @@ app.get('/api/me', async (req, res) => {
     res.json({ user: result.rows[0] });
   } catch (e) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'OK', db: 'connected' });
+  } catch (e) {
+    res.status(500).json({ status: 'ERROR', db: e.message });
   }
 });
 
