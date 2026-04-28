@@ -47,13 +47,13 @@ app.post('/api/register', async (req, res) => {
     return res.status(400).json({ error: 'All fields required' });
   }
   try {
-    const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
+    const existing = await pool.query('SELECT id FROM sotrudnik WHERE login = $1', [login]);
     if (existing.rows.length > 0) {
       return res.status(400).json({ error: 'Login already taken' });
     }
     const hash = await bcrypt.hash(password, 10);
     const insertRes = await pool.query(
-      'INSERT INTO users (full_name, login, password_hash) VALUES ($1, $2, $3) RETURNING id',
+      'INSERT INTO sotrudnik (fio, login, parol_hash, rol_id, podrazdelenie_id) VALUES ($1, $2, $3, 6, 1) RETURNING id',
       [fullName, login, hash]
     );
     console.log('User registered id:', insertRes.rows[0]?.id);
@@ -70,17 +70,17 @@ app.post('/api/login', async (req, res) => {
     return res.status(400).json({ error: 'Login and password required' });
   }
   try {
-    const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    const result = await pool.query('SELECT * FROM sotrudnik WHERE login = $1', [login]);
     console.log('Login query rows:', result.rows.length);
     if (result.rows.length === 0) {
       return res.status(400).json({ error: 'Invalid credentials (user not found)' });
     }
     const user = result.rows[0];
-    let valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid && password === user.password_hash) {
+    let valid = await bcrypt.compare(password, user.parol_hash);
+    if (!valid && password === user.parol_hash) {
       valid = true; // fallback for old plaintext passwords
     }
-    console.log('Password check valid:', valid, 'hash starts with:', user.password_hash?.substring(0,7));
+    console.log('Password check valid:', valid, 'hash starts with:', user.parol_hash?.substring(0,7));
     if (!valid) {
       return res.status(400).json({ error: 'Invalid credentials (wrong password)' });
     }
@@ -92,7 +92,7 @@ app.post('/api/login', async (req, res) => {
     res.json({
       success: true,
       token,
-      user: { fullName: user.full_name, login: user.login }
+      user: { fullName: user.fio, login: user.login, rolId: user.rol_id, podrazdelenieId: user.podrazdelenie_id }
     });
   } catch (e) {
     console.error('Login error:', e);
