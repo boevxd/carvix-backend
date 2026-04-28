@@ -13,8 +13,13 @@ app.use((req, res, next) => {
   next();
 });
 
+const DB_URL = process.env.DATABASE_URL ||
+  'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a.oregon-postgres.render.com/carvix';
+
+console.log('Connecting to DB:', DB_URL.replace(/:([^@]+)@/, ':***@'));
+
 const pool = new Pool({
-  connectionString: 'postgresql://carvix:7o8t8yAFx4Ts2sPTSf8MTgBvLqERAnM9@dpg-d7ocin2qqhas73c2i93g-a.oregon-postgres.render.com/carvix',
+  connectionString: DB_URL,
   ssl: { rejectUnauthorized: false }
 });
 
