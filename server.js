@@ -158,6 +158,15 @@ app.get('/api/debug/schema', async (req, res) => {
   }
 });
 
+app.get('/api/debug/sotrudnik', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, fio, login, rol_id FROM sotrudnik ORDER BY id DESC LIMIT 10');
+    res.json({ count: result.rows.length, users: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/debug/users', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, login, full_name, created_at FROM users ORDER BY id DESC LIMIT 10');
