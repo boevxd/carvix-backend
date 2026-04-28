@@ -547,7 +547,7 @@ app.get('/api/feedback/conversations', auth, async (req, res) => {
       FROM partners p
       JOIN sotrudnik s ON s.id = p.uid
       LEFT JOIN rol r ON r.id = s.rol_id
-      WHERE s.id IS NOT NULL
+      WHERE s.id IS NOT NULL AND s.id <> $1
       ORDER BY last_time DESC NULLS LAST
     `, [me]);
     res.json({ conversations: r.rows });
