@@ -135,6 +135,29 @@ app.get('/api/debug/tables', async (req, res) => {
   }
 });
 
+app.get('/api/debug/schema', async (req, res) => {
+  try {
+    const usersSchema = await pool.query(`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_name = 'users' AND table_schema = 'public'
+      ORDER BY ordinal_position
+    `);
+    const sotrudnikSchema = await pool.query(`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_name = 'sotrudnik' AND table_schema = 'public'
+      ORDER BY ordinal_position
+    `);
+    res.json({
+      users: usersSchema.rows,
+      sotrudnik: sotrudnikSchema.rows
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/debug/users', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, login, full_name, created_at FROM users ORDER BY id DESC LIMIT 10');
