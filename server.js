@@ -782,16 +782,90 @@ app.get('/api/ts/:id', auth, async (req, res) => {
   }
 });
 
-app.put('/api/ts/:id', auth, requireRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN), async (req, res) => {
-  const { tekuschee_sostoyanie, probeg } = req.body;
+app.put('/api/ts/:id', auth, requireRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN), validateIdParam, async (req, res) => {
+  const tekuschee = req.body?.tekuschee_sostoyanie != null
+    ? req.body.tekuschee_sostoyanie.toString().trim() : null;
+  const probegRaw = req.body?.probeg;
+  const probeg = probegRaw != null ? parseInt(probegRaw, 10) : null;
+  if (probeg !== null && (!Number.isInteger(probeg) || probeg < 0)) {
+    return res.status(400).json({ error: 'Некорректный пробег' });
+  }
+  const gos = req.body?.gos_nomer != null ? req.body.gos_nomer.toString().trim() : null;
+  const invent = req.body?.invent_nomer != null ? req.body.invent_nomer.toString().trim() : null;
+  const modelId = req.body?.model_id != null ? parseId(req.body.model_id) : null;
+  const podrId = req.body?.podrazdelenie_id != null ? parseId(req.body.podrazdelenie_id) : null;
+
   try {
     await pool.query(
-      'UPDATE transportnoe_sredstvo SET tekuschee_sostoyanie = COALESCE($1, tekuschee_sostoyanie), probeg = COALESCE($2, probeg) WHERE id = $3',
-      [tekuschee_sostoyanie, probeg, req.params.id]
+      `UPDATE transportnoe_sredstvo SET
+         tekuschee_sostoyanie = COALESCE($1, tekuschee_sostoyanie),
+         probeg = COALESCE($2, probeg),
+         gos_nomer = COALESCE($3, gos_nomer),
+         invent_nomer = COALESCE($4, invent_nomer),
+         model_id = COALESCE($5, model_id),
+         podrazdelenie_id = COALESCE($6, podrazdelenie_id)
+       WHERE id = $7`,
+      [tekuschee, probeg, gos, invent, modelId, podrId, req.params.id]
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('Update TS:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Создать ТС (главмех/админ)
+app.post('/api/ts', auth, requireRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN), async (req, res) => {
+  const gos = (req.body?.gos_nomer || '').toString().trim();
+  const invent = (req.body?.invent_nomer || '').toString().trim();
+  const modelId = parseId(req.body?.model_id);
+  const podrId = parseId(req.body?.podrazdelenie_id);
+  const probegRaw = req.body?.probeg;
+  const probeg = probegRaw != null && probegRaw !== '' ? parseInt(probegRaw, 10) : 0;
+  const tekuschee = (req.body?.tekuschee_sostoyanie || 'Исправно').toString().trim();
+
+  if (!gos) return res.status(400).json({ error: 'Госномер обязателен' });
+  if (gos.length > 20) return res.status(400).json({ error: 'Госномер слишком длинный' });
+  if (!modelId) return res.status(400).json({ error: 'Модель обязательна' });
+  if (!podrId) return res.status(400).json({ error: 'Подразделение обязательно' });
+  if (!Number.isInteger(probeg) || probeg < 0) {
+    return res.status(400).json({ error: 'Некорректный пробег' });
+  }
+
+  try {
+    const r = await pool.query(
+      `INSERT INTO transportnoe_sredstvo (gos_nomer, invent_nomer, model_id, podrazdelenie_id, probeg, tekuschee_sostoyanie)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [gos, invent || null, modelId, podrId, probeg, tekuschee]
+    );
+    res.json({ success: true, id: r.rows[0].id });
+  } catch (e) {
+    console.error('Create TS:', e);
+    if (e.code === '23505') {
+      return res.status(400).json({ error: 'ТС с таким номером уже существует' });
+    }
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Удалить ТС (только админ)
+app.delete('/api/ts/:id', auth, requireRole(ROLE_ADMIN), validateIdParam, async (req, res) => {
+  try {
+    // Проверяем, есть ли заявки на это ТС
+    const usage = await pool.query(
+      'SELECT COUNT(*)::int AS cnt FROM zayavka WHERE ts_id = $1',
+      [req.params.id]
+    );
+    if (usage.rows[0].cnt > 0) {
+      return res.status(400).json({
+        error: `Нельзя удалить: есть ${usage.rows[0].cnt} связанных заявок`
+      });
+    }
+    await pool.query('DELETE FROM transportnoe_sredstvo WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Delete TS:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1176,6 +1250,89 @@ app.delete('/api/fcm-token', auth, async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     console.error('[FCM-TOKEN] Delete error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============ СТАТИСТИКА (только админ) ============
+app.get('/api/stats', auth, requireRole(ROLE_ADMIN), async (req, res) => {
+  try {
+    const [totals, byStatus, byTip, costs, monthly, topTs] = await Promise.all([
+      // Общие счётчики
+      pool.query(`
+        SELECT
+          (SELECT COUNT(*)::int FROM zayavka) AS total_zayavki,
+          (SELECT COUNT(*)::int FROM transportnoe_sredstvo) AS total_ts,
+          (SELECT COUNT(*)::int FROM sotrudnik) AS total_sotrudnikov,
+          (SELECT COUNT(*)::int FROM remont WHERE data_okonchaniya IS NULL) AS active_remonts,
+          (SELECT COUNT(*)::int FROM zayavka WHERE status_id = 1) AS new_zayavki
+      `),
+      // По статусам
+      pool.query(`
+        SELECT s.id, s.nazvanie AS name, COUNT(z.id)::int AS count
+        FROM status s
+        LEFT JOIN zayavka z ON z.status_id = s.id
+        GROUP BY s.id, s.nazvanie
+        ORDER BY s.id
+      `),
+      // По типам поломок (топ-10)
+      pool.query(`
+        SELECT tr.id, tr.nazvanie AS name, COUNT(z.id)::int AS count
+        FROM tip_remonta tr
+        LEFT JOIN zayavka z ON z.tip_remonta_id = tr.id
+        GROUP BY tr.id, tr.nazvanie
+        HAVING COUNT(z.id) > 0
+        ORDER BY count DESC
+        LIMIT 10
+      `),
+      // Суммы трат
+      pool.query(`
+        SELECT
+          COALESCE(SUM(stoimost_rabot), 0)::float AS total_works,
+          COALESCE(SUM(stoimost_zapchastey), 0)::float AS total_parts,
+          COALESCE(SUM(COALESCE(stoimost_rabot,0) + COALESCE(stoimost_zapchastey,0)), 0)::float AS total_sum,
+          COUNT(*)::int AS remonts_count
+        FROM remont
+      `),
+      // Траты по месяцам (последние 6 мес)
+      pool.query(`
+        SELECT
+          TO_CHAR(DATE_TRUNC('month', COALESCE(r.data_okonchaniya, r.data_nachala)), 'YYYY-MM') AS month,
+          COALESCE(SUM(COALESCE(r.stoimost_rabot,0) + COALESCE(r.stoimost_zapchastey,0)), 0)::float AS sum,
+          COUNT(*)::int AS count
+        FROM remont r
+        WHERE COALESCE(r.data_okonchaniya, r.data_nachala) >= NOW() - INTERVAL '6 months'
+        GROUP BY DATE_TRUNC('month', COALESCE(r.data_okonchaniya, r.data_nachala))
+        ORDER BY month
+      `),
+      // Топ-5 ТС по числу ремонтов
+      pool.query(`
+        SELECT ts.id, ts.gos_nomer AS gos_nomer,
+               mk.nazvanie AS marka, m.nazvanie AS model,
+               COUNT(z.id)::int AS repairs_count,
+               COALESCE(SUM(COALESCE(r.stoimost_rabot,0) + COALESCE(r.stoimost_zapchastey,0)), 0)::float AS total_cost
+        FROM transportnoe_sredstvo ts
+        LEFT JOIN model m ON m.id = ts.model_id
+        LEFT JOIN marka mk ON mk.id = m.marka_id
+        LEFT JOIN zayavka z ON z.ts_id = ts.id
+        LEFT JOIN remont r ON r.zayavka_id = z.id
+        GROUP BY ts.id, ts.gos_nomer, mk.nazvanie, m.nazvanie
+        HAVING COUNT(z.id) > 0
+        ORDER BY repairs_count DESC, total_cost DESC
+        LIMIT 5
+      `)
+    ]);
+
+    res.json({
+      totals: totals.rows[0],
+      by_status: byStatus.rows,
+      by_tip_remonta: byTip.rows,
+      costs: costs.rows[0],
+      monthly: monthly.rows,
+      top_ts: topTs.rows
+    });
+  } catch (e) {
+    console.error('Stats:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
