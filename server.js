@@ -3,10 +3,38 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
+
+// Безопасность HTTP-заголовков
+app.use(helmet({
+  // отключаем CSP — API не отдаёт HTML
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// Глобальный rate-limit
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use(globalLimiter);
+
+// Жёсткий лимит для логина/регистрации (защита от brute-force)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много попыток, попробуйте позже' }
+});
 
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
@@ -20,10 +48,23 @@ console.log('Connecting to DB:', DB_URL.replace(/:([^@]+)@/, ':***@'));
 
 const pool = new Pool({
   connectionString: DB_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000
 });
 
-const JWT_SECRET = 'carvix_secret_key_2024';
+// Прогрев: держим соединение с БД горячим, чтобы первый запрос не тормозил
+setInterval(async () => {
+  try { await pool.query('SELECT 1'); } catch (_) {}
+}, 25 * 60 * 1000); // каждые 25 мин (Render free tier засыпает через 30 мин)
+
+const JWT_SECRET = process.env.JWT_SECRET || 'carvix_secret_key_2024';
+if (!process.env.JWT_SECRET) {
+  console.warn('[WARN] JWT_SECRET не задан в env — используется значение по умолчанию (не безопасно для прода)');
+}
 
 // Roles
 const ROLE_MECHANIC = 3;
@@ -36,6 +77,58 @@ const STATUS_IN_PROGRESS = 2;
 const STATUS_DONE = 3;
 const STATUS_REJECTED = 4;
 const STATUS_WAIT_PARTS = 5;
+
+// FCM configuration: читаем Service Account из Secret File (приоритет) или env-переменной.
+// Render монтирует Secret Files в /etc/secrets/<filename>.
+const fs = require('fs');
+const path = require('path');
+
+const FCM_SERVICE_ACCOUNT_PATH = process.env.FCM_SERVICE_ACCOUNT_PATH || '/etc/secrets/service-account.json';
+const FCM_SERVICE_ACCOUNT_JSON = process.env.FCM_SERVICE_ACCOUNT_JSON || null;
+
+let cachedServiceAccount = null;
+let serviceAccountLoadAttempted = false;
+let fcmAccessToken = null;
+let fcmTokenExpiry = 0;
+
+function loadServiceAccount() {
+  // 1. Пробуем secret file
+  try {
+    if (fs.existsSync(FCM_SERVICE_ACCOUNT_PATH)) {
+      const raw = fs.readFileSync(FCM_SERVICE_ACCOUNT_PATH, 'utf8');
+      const sa = JSON.parse(raw);
+      console.log(`[FCM] Service account loaded from ${FCM_SERVICE_ACCOUNT_PATH} (project: ${sa.project_id})`);
+      return sa;
+    }
+  } catch (e) {
+    console.error(`[FCM] Failed to read ${FCM_SERVICE_ACCOUNT_PATH}:`, e.message);
+  }
+
+  // 2. Fallback на env-переменную
+  if (FCM_SERVICE_ACCOUNT_JSON) {
+    try {
+      const sa = JSON.parse(FCM_SERVICE_ACCOUNT_JSON);
+      console.log(`[FCM] Service account loaded from env (project: ${sa.project_id})`);
+      return sa;
+    } catch (e) {
+      console.error('[FCM] Invalid FCM_SERVICE_ACCOUNT_JSON env:', e.message);
+    }
+  }
+
+  console.warn('[FCM] Service account not configured — push отключён');
+  return null;
+}
+
+function getServiceAccount() {
+  if (!serviceAccountLoadAttempted) {
+    cachedServiceAccount = loadServiceAccount();
+    serviceAccountLoadAttempted = true;
+  }
+  return cachedServiceAccount;
+}
+
+// Прогрев при старте, чтобы сразу увидеть в логах статус
+getServiceAccount();
 
 async function initDB() {
   try {
@@ -62,11 +155,192 @@ async function initDB() {
       await pool.query("INSERT INTO _migrations(name) VALUES ('reset_feedback_v2')");
       console.log('[migration] mekhanik_feedback wiped clean');
     }
+
+    // Таблица уведомлений
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS uvedomleniya (
+        id SERIAL PRIMARY KEY,
+        poluchatel_id INTEGER NOT NULL REFERENCES sotrudnik(id) ON DELETE CASCADE,
+        tip TEXT NOT NULL,
+        soobshenie TEXT NOT NULL,
+        zayavka_id INTEGER REFERENCES zayavka(id) ON DELETE SET NULL,
+        prochitano BOOLEAN DEFAULT FALSE,
+        data_sozdaniya TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('uvedomleniya table ready');
+
+    // Таблица FCM токенов
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS fcm_tokens (
+        id SERIAL PRIMARY KEY,
+        sotrudnik_id INTEGER NOT NULL REFERENCES sotrudnik(id) ON DELETE CASCADE,
+        fcm_token TEXT NOT NULL,
+        data_obnovleniya TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(sotrudnik_id, fcm_token)
+      )
+    `);
+    console.log('fcm_tokens table ready');
+
+    // Индексы для часто-используемых запросов
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_uvedomleniya_poluchatel ON uvedomleniya(poluchatel_id, prochitano);
+      CREATE INDEX IF NOT EXISTS idx_uvedomleniya_data ON uvedomleniya(data_sozdaniya DESC);
+      CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(sotrudnik_id);
+      CREATE INDEX IF NOT EXISTS idx_feedback_komu ON mekhanik_feedback(komu_id, prochitano);
+      CREATE INDEX IF NOT EXISTS idx_feedback_pair ON mekhanik_feedback(ot_sotrudnika_id, komu_id, data_sozdaniya DESC);
+      CREATE INDEX IF NOT EXISTS idx_zayavka_status ON zayavka(status_id);
+    `);
+    console.log('indexes ready');
   } catch (e) {
     console.error('DB init error:', e.message);
   }
 }
 initDB();
+
+// ============ NOTIFICATION HELPER ============
+async function notify(recipientIds, tip, soobshenie, zayavkaId = null) {
+  console.log(`[NOTIFY] Sending to ${recipientIds.length} recipients, tip: ${tip}`);
+  for (const rid of recipientIds) {
+    try {
+      // Save to database
+      const result = await pool.query(
+        'INSERT INTO uvedomleniya (poluchatel_id, tip, soobshenie, zayavka_id) VALUES ($1,$2,$3,$4) RETURNING id',
+        [rid, tip, soobshenie, zayavkaId]
+      );
+      console.log(`[NOTIFY] Created notification ${result.rows[0].id} for user ${rid}`);
+      // Send push notification
+      await sendPushNotification(rid, soobshenie, zayavkaId);
+    } catch (e) {
+      console.error(`[NOTIFY] Error for user ${rid}:`, e.message);
+    }
+  }
+}
+
+async function getUsersByRole(...roles) {
+  const r = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = ANY($1)', [roles]);
+  return r.rows.map(row => row.id);
+}
+
+// ============ PUSH NOTIFICATIONS ============
+// Get OAuth2 access token from service account
+async function getFcmAccessToken() {
+  const sa = getServiceAccount();
+  if (!sa) return null;
+  
+  // Return cached token if still valid
+  if (fcmAccessToken && Date.now() < fcmTokenExpiry - 60000) {
+    return fcmAccessToken;
+  }
+
+  try {
+    const jwt = require('jsonwebtoken');
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      iss: sa.client_email,
+      sub: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600
+    };
+    
+    const signedJwt = jwt.sign(payload, sa.private_key, { algorithm: 'RS256' });
+    
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${signedJwt}`
+    });
+    
+    const data = await response.json();
+    if (data.access_token) {
+      fcmAccessToken = data.access_token;
+      fcmTokenExpiry = Date.now() + (data.expires_in * 1000);
+      return fcmAccessToken;
+    }
+  } catch (e) {
+    console.error('FCM token error:', e.message);
+  }
+  return null;
+}
+
+async function sendPushNotification(userId, body, zayavkaId = null) {
+  const sa = getServiceAccount();
+  if (!sa) return;
+
+  try {
+    const accessToken = await getFcmAccessToken();
+    if (!accessToken) {
+      console.log('[PUSH] No FCM access token');
+      return;
+    }
+
+    const tokensResult = await pool.query(
+      'SELECT fcm_token FROM fcm_tokens WHERE sotrudnik_id = $1',
+      [userId]
+    );
+    const tokens = tokensResult.rows.map(r => r.fcm_token);
+    if (tokens.length === 0) return;
+
+    const title = 'CarVix';
+    const url = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
+
+    // Параллельная отправка всем токенам
+    await Promise.all(tokens.map(async (token) => {
+      const message = {
+        message: {
+          token,
+          notification: { title, body },
+          data: {
+            zayavka_id: zayavkaId != null ? String(zayavkaId) : '',
+            title,
+            body
+          },
+          android: {
+            priority: 'high',
+            notification: {
+              channel_id: 'carvix_notifications',
+              sound: 'default'
+            }
+          }
+        }
+      };
+
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`
+          },
+          body: JSON.stringify(message)
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          console.error(`[PUSH] HTTP ${resp.status}: ${errText.substring(0, 200)}`);
+          // Невалидный/устаревший токен — удаляем из БД
+          if (resp.status === 404 || resp.status === 400) {
+            try {
+              const errJson = JSON.parse(errText);
+              const status = errJson?.error?.status;
+              if (status === 'NOT_FOUND' || status === 'INVALID_ARGUMENT' ||
+                  status === 'UNREGISTERED') {
+                await pool.query('DELETE FROM fcm_tokens WHERE fcm_token = $1', [token]);
+                console.log(`[PUSH] Removed invalid token: ${token.substring(0, 20)}…`);
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (e) {
+        console.error('[PUSH] send error:', e.message);
+      }
+    }));
+  } catch (e) {
+    console.error('sendPushNotification error:', e.message);
+  }
+}
 
 // ============ AUTH MIDDLEWARE ============
 function auth(req, res, next) {
@@ -87,13 +361,44 @@ function requireRole(...roles) {
   };
 }
 
+// Безопасный парсер положительных целых ID из params/query/body
+function parseId(value) {
+  const n = parseInt(value, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// Middleware для валидации :id
+function validateIdParam(req, res, next) {
+  const id = parseId(req.params.id);
+  if (id === null) return res.status(400).json({ error: 'Invalid id' });
+  req.params.id = id;
+  next();
+}
+
 // ============ AUTH ============
-app.post('/api/register', async (req, res) => {
-  const { fullName, login, password } = req.body;
-  if (!fullName || !login || !password) return res.status(400).json({ error: 'All fields required' });
+const LOGIN_REGEX = /^[a-zA-Z0-9_.-]{3,32}$/;
+
+app.post('/api/register', authLimiter, async (req, res) => {
+  const fullName = (req.body?.fullName || '').toString().trim();
+  const login = (req.body?.login || '').toString().trim();
+  const password = (req.body?.password || '').toString();
+
+  if (!fullName || !login || !password) {
+    return res.status(400).json({ error: 'Все поля обязательны' });
+  }
+  if (fullName.length < 2 || fullName.length > 100) {
+    return res.status(400).json({ error: 'ФИО должно быть от 2 до 100 символов' });
+  }
+  if (!LOGIN_REGEX.test(login)) {
+    return res.status(400).json({ error: 'Логин: 3-32 символа, буквы/цифры/._-' });
+  }
+  if (password.length < 6 || password.length > 128) {
+    return res.status(400).json({ error: 'Пароль должен быть от 6 до 128 символов' });
+  }
+
   try {
     const ex = await pool.query('SELECT id FROM sotrudnik WHERE login = $1', [login]);
-    if (ex.rows.length) return res.status(400).json({ error: 'Login already taken' });
+    if (ex.rows.length) return res.status(400).json({ error: 'Логин уже занят' });
     const hash = await bcrypt.hash(password, 10);
     const r = await pool.query(
       'INSERT INTO sotrudnik (fio, login, parol_hash, rol_id, podrazdelenie_id) VALUES ($1,$2,$3,$4,$5) RETURNING id',
@@ -106,17 +411,28 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-app.post('/api/login', async (req, res) => {
-  const { login, password } = req.body;
-  if (!login || !password) return res.status(400).json({ error: 'Login and password required' });
+app.post('/api/login', authLimiter, async (req, res) => {
+  const login = (req.body?.login || '').toString().trim();
+  const password = (req.body?.password || '').toString();
+  if (!login || !password) return res.status(400).json({ error: 'Логин и пароль обязательны' });
+  if (login.length > 64 || password.length > 128) {
+    return res.status(400).json({ error: 'Слишком длинные значения' });
+  }
   try {
     const r = await pool.query('SELECT * FROM sotrudnik WHERE login = $1', [login]);
-    if (!r.rows.length) return res.status(400).json({ error: 'Invalid credentials' });
+    if (!r.rows.length) return res.status(400).json({ error: 'Неверный логин или пароль' });
     const u = r.rows[0];
     let valid = false;
     try { valid = await bcrypt.compare(password, u.parol_hash || ''); } catch {}
-    if (!valid && password === u.parol_hash) valid = true;
-    if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
+    // Поддержка legacy незахешированных паролей — мигрируем при удачном совпадении
+    if (!valid && u.parol_hash && password === u.parol_hash) {
+      valid = true;
+      try {
+        const newHash = await bcrypt.hash(password, 10);
+        await pool.query('UPDATE sotrudnik SET parol_hash = $1 WHERE id = $2', [newHash, u.id]);
+      } catch (e) { console.error('Password migration failed:', e.message); }
+    }
+    if (!valid) return res.status(400).json({ error: 'Неверный логин или пароль' });
     const token = jwt.sign(
       { userId: u.id, login: u.login, rolId: u.rol_id, fio: u.fio },
       JWT_SECRET,
@@ -253,17 +569,33 @@ app.get('/api/zayavki/:id', auth, async (req, res) => {
 
 // Создать заявку (главмех/админ)
 app.post('/api/zayavki', auth, requireRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN), async (req, res) => {
-  const { ts_id, tip_remonta_id, opisanie, prioritet } = req.body;
-  if (!ts_id || !tip_remonta_id || !opisanie) return res.status(400).json({ error: 'ts_id, tip_remonta_id, opisanie required' });
+  const tsId = parseId(req.body?.ts_id);
+  const tipRemontaId = parseId(req.body?.tip_remonta_id);
+  const opisanie = (req.body?.opisanie || '').toString().trim();
+  const prioritetRaw = parseInt(req.body?.prioritet, 10);
+  const prioritet = Number.isInteger(prioritetRaw) && prioritetRaw >= 1 && prioritetRaw <= 5
+    ? prioritetRaw : 3;
+
+  if (!tsId || !tipRemontaId) {
+    return res.status(400).json({ error: 'Некорректный ts_id или tip_remonta_id' });
+  }
+  if (opisanie.length < 3 || opisanie.length > 2000) {
+    return res.status(400).json({ error: 'Описание: от 3 до 2000 символов' });
+  }
+
   try {
     const r = await pool.query(`
       INSERT INTO zayavka (data_sozdaniya, sozdatel_id, ts_id, tip_remonta_id, opisanie, status_id, prioritet, data_rezhima)
       VALUES (NOW(), $1, $2, $3, $4, $5, $6, NOW()) RETURNING id
-    `, [req.user.userId, ts_id, tip_remonta_id, opisanie, STATUS_NEW, prioritet || 3]);
-    res.json({ success: true, id: r.rows[0].id });
+    `, [req.user.userId, tsId, tipRemontaId, opisanie, STATUS_NEW, prioritet]);
+    const newId = r.rows[0].id;
+    // Уведомляем всех механиков о новой заявке
+    const mechanics = await getUsersByRole(ROLE_MECHANIC);
+    await notify(mechanics, 'new_zayavka', `Новая заявка #${newId}: ${opisanie.substring(0, 80)}`, newId);
+    res.json({ success: true, id: newId });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    console.error('Create zayavka:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -331,6 +663,11 @@ app.post('/api/zayavki/:id/take', auth, requireRole(ROLE_MECHANIC, ROLE_HEAD_MEC
       [req.params.id]
     );
     await client.query('COMMIT');
+    // Уведомляем главмехов и создателя заявки
+    const zayavkaId = parseInt(req.params.id);
+    const heads = await getUsersByRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN);
+    const recipients = [...new Set([...heads, zr.rows[0].sozdatel_id].filter(id => id && id !== req.user.userId))];
+    await notify(recipients, 'zayavka_taken', `${req.user.fio} взял заявку #${zayavkaId} в работу`, zayavkaId);
     res.json({ success: true });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -388,6 +725,22 @@ app.post('/api/zayavki/:id/status', auth, requireRole(ROLE_MECHANIC, ROLE_HEAD_M
          WHERE id = (SELECT ts_id FROM zayavka WHERE id = $1)`,
         [req.params.id]
       );
+    }
+    // Уведомления о смене статуса
+    const zId = parseInt(req.params.id);
+    const statusNames = { [STATUS_DONE]: 'завершена', [STATUS_REJECTED]: 'отклонена', [STATUS_WAIT_PARTS]: 'ожидает запчасти', [STATUS_IN_PROGRESS]: 'возобновлена' };
+    const statusTips = { [STATUS_DONE]: 'status_done', [STATUS_REJECTED]: 'status_rejected', [STATUS_WAIT_PARTS]: 'status_wait_parts', [STATUS_IN_PROGRESS]: 'status_in_progress' };
+    const sName = statusNames[status_id];
+    const sTip = statusTips[status_id];
+    if (sName && sTip) {
+      const msg = `Заявка #${zId} ${sName} (${req.user.fio})`;
+      // Определяем кого уведомить
+      const heads = await getUsersByRole(ROLE_HEAD_MECHANIC, ROLE_ADMIN);
+      // Также уведомляем механика-исполнителя если статус меняет не он
+      const rm = await pool.query('SELECT mekhanik_id FROM remont WHERE zayavka_id = $1 ORDER BY id DESC LIMIT 1', [zId]);
+      const mekId = rm.rows[0]?.mekhanik_id;
+      const allIds = [...new Set([...heads, mekId].filter(id => id && id !== req.user.userId))];
+      await notify(allIds, sTip, msg, zId);
     }
     res.json({ success: true });
   } catch (e) {
@@ -568,28 +921,36 @@ app.get('/api/feedback', auth, async (req, res) => {
 });
 
 app.post('/api/feedback', auth, async (req, res) => {
-  const { soobshenie, komu_id, zayavka_id } = req.body;
-  if (!soobshenie) return res.status(400).json({ error: 'soobshenie required' });
+  const soobshenie = (req.body?.soobshenie || '').toString().trim();
+  const komuId = parseId(req.body?.komu_id);
+  const zayavkaId = req.body?.zayavka_id != null ? parseId(req.body.zayavka_id) : null;
+
+  if (!soobshenie) return res.status(400).json({ error: 'Сообщение не может быть пустым' });
+  if (soobshenie.length > 4000) return res.status(400).json({ error: 'Сообщение слишком длинное (макс. 4000)' });
+
   try {
-    let recipientId = komu_id;
+    let recipientId = komuId;
     if (!recipientId) {
-      // если получатель не указан — отправляем первому главмеху
       const gm = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = $1 LIMIT 1', [ROLE_HEAD_MECHANIC]);
       recipientId = gm.rows[0]?.id || null;
     }
     if (!recipientId) {
-      return res.status(400).json({ error: 'Получатель не определён. Укажите komu_id.' });
+      return res.status(400).json({ error: 'Получатель не определён' });
     }
     if (recipientId === req.user.userId) {
       return res.status(400).json({ error: 'Нельзя отправить сообщение самому себе' });
     }
     await pool.query(
       'INSERT INTO mekhanik_feedback (ot_sotrudnika_id, komu_id, zayavka_id, soobshenie) VALUES ($1,$2,$3,$4)',
-      [req.user.userId, recipientId, zayavka_id || null, soobshenie]
+      [req.user.userId, recipientId, zayavkaId, soobshenie]
     );
+    // Push о новом сообщении
+    const preview = soobshenie.length > 80 ? soobshenie.substring(0, 80) + '…' : soobshenie;
+    sendPushNotification(recipientId, `${req.user.fio}: ${preview}`, zayavkaId).catch(() => {});
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('Feedback create:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -699,12 +1060,134 @@ app.post('/api/feedback/:id/read', auth, async (req, res) => {
   }
 });
 
+// ============ NOTIFICATIONS ============
+app.get('/api/notifications', auth, async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT * FROM uvedomleniya
+      WHERE poluchatel_id = $1
+      ORDER BY data_sozdaniya DESC
+      LIMIT 100
+    `, [req.user.userId]);
+    res.json({ notifications: r.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/notifications/unread', auth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM uvedomleniya WHERE poluchatel_id = $1 AND prochitano = FALSE',
+      [req.user.userId]
+    );
+    res.json({ count: r.rows[0].count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/notifications/:id/read', auth, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE uvedomleniya SET prochitano = TRUE WHERE id = $1 AND poluchatel_id = $2',
+      [req.params.id, req.user.userId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/notifications/read-all', auth, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE uvedomleniya SET prochitano = TRUE WHERE poluchatel_id = $1 AND prochitano = FALSE',
+      [req.user.userId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============ FCM TOKEN ============
+app.post('/api/fcm-token', auth, async (req, res) => {
+  const fcmToken = (req.body?.fcm_token || '').toString().trim();
+  if (!fcmToken || fcmToken.length < 20 || fcmToken.length > 4096) {
+    return res.status(400).json({ error: 'fcm_token required' });
+  }
+  console.log(`[FCM-TOKEN] user=${req.user.userId} token=${fcmToken.substring(0, 20)}…`);
+  try {
+    // Если этот же токен висит на другом пользователе (смена аккаунта на устройстве) — переносим
+    await pool.query(
+      'DELETE FROM fcm_tokens WHERE fcm_token = $1 AND sotrudnik_id <> $2',
+      [fcmToken, req.user.userId]
+    );
+    await pool.query(
+      `INSERT INTO fcm_tokens (sotrudnik_id, fcm_token) VALUES ($1, $2)
+       ON CONFLICT (sotrudnik_id, fcm_token) DO UPDATE SET data_obnovleniya = CURRENT_TIMESTAMP`,
+      [req.user.userId, fcmToken]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[FCM-TOKEN] Error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/fcm-token', auth, async (req, res) => {
+  const fcmToken = (req.body?.fcm_token || '').toString().trim();
+  if (!fcmToken) return res.status(400).json({ error: 'fcm_token required' });
+  try {
+    await pool.query(
+      'DELETE FROM fcm_tokens WHERE sotrudnik_id = $1 AND fcm_token = $2',
+      [req.user.userId, fcmToken]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error('[FCM-TOKEN] Delete error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============ DEBUG ============
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'OK' });
+    const sa = getServiceAccount();
+    const fileExists = fs.existsSync(FCM_SERVICE_ACCOUNT_PATH);
+    res.json({
+      status: 'OK',
+      fcm: sa ? 'configured' : 'not configured',
+      project: sa?.project_id || null,
+      service_account_source: fileExists
+        ? `file:${FCM_SERVICE_ACCOUNT_PATH}`
+        : (FCM_SERVICE_ACCOUNT_JSON ? 'env' : 'none')
+    });
   } catch (e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Test notification (for debugging)
+app.post('/api/test-notification', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    console.log(`[TEST] Creating test notification for user ${userId}`);
+    
+    // Create test notification
+    await pool.query(
+      'INSERT INTO uvedomleniya (poluchatel_id, tip, soobshenie, zayavka_id) VALUES ($1,$2,$3,$4)',
+      [userId, 'test', 'Тестовое уведомление', null]
+    );
+    
+    // Try to send push
+    await sendPushNotification(userId, 'Тестовое push-уведомление', null);
+    
+    res.json({ success: true, message: 'Notification created' });
+  } catch (e) {
+    console.error('[TEST] Error:', e);
     res.status(500).json({ error: e.message });
   }
 });
