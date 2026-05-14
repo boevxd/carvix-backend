@@ -474,7 +474,7 @@ app.get('/api/refs', auth, async (req, res) => {
   try {
     const [statuses, roles, types, marks, models, divisions] = await Promise.all([
       pool.query('SELECT * FROM status ORDER BY id'),
-      pool.query('SELECT * FROM rol ORDER BY id'),
+      pool.query('SELECT * FROM rol WHERE id IN (3,4,5) ORDER BY id'),
       pool.query('SELECT * FROM tip_remonta ORDER BY id'),
       pool.query('SELECT * FROM marka ORDER BY id'),
       pool.query('SELECT * FROM model ORDER BY id'),
