@@ -1107,7 +1107,36 @@ app.post('/api/notifications/read-all', auth, async (req, res) => {
     );
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('Mark-all-read:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Удалить одно уведомление
+app.delete('/api/notifications/:id', auth, validateIdParam, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'DELETE FROM uvedomleniya WHERE id = $1 AND poluchatel_id = $2',
+      [req.params.id, req.user.userId]
+    );
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (e) {
+    console.error('Delete notification:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Очистить все уведомления текущего пользователя
+app.delete('/api/notifications', auth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      'DELETE FROM uvedomleniya WHERE poluchatel_id = $1',
+      [req.user.userId]
+    );
+    res.json({ success: true, deleted: r.rowCount });
+  } catch (e) {
+    console.error('Clear notifications:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
