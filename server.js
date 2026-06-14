@@ -238,32 +238,94 @@ async function initDB() {
     `);
     await pool.query(`
       INSERT INTO tip_remonta (id, nazvanie) VALUES
-      (1,'ТО'), (2,'Ремонт двигателя'), (3,'Ремонт ходовой'), (4,'Диагностика'), (5,'Покраска')
+      (1,'ТО'), (2,'Ремонт двигателя'), (3,'Ремонт ходовой'), (4,'Диагностика'), (5,'Покраска'),
+      (6,'Замена масла'), (7,'Ремонт электрики'), (8,'Шиномонтаж'), (9,'Ремонт кузова'), (10,'Ремонт КПП')
       ON CONFLICT (id) DO NOTHING
     `);
     await pool.query(`
       INSERT INTO marka (id, nazvanie) VALUES
-      (1,'Toyota'), (2,'KamAZ'), (3,'BMW'), (4,'Mercedes-Benz')
+      (1,'Toyota'), (2,'KamAZ'), (3,'BMW'), (4,'Mercedes-Benz'), (5,'Volvo'),
+      (6,'MAN'), (7,'Scania'), (8,'Hyundai'), (9,'Ford'), (10,'Mazda'),
+      (11,'Nissan'), (12,'Volkswagen'), (13,'Kia'), (14,'Lada'), (15,'GAZ'),
+      (16,'Skoda'), (17,'Renault'), (18,'Peugeot'), (19,'Citroen'), (20,'Mitsubishi')
       ON CONFLICT (id) DO NOTHING
     `);
     await pool.query(`
       INSERT INTO model (id, marka_id, nazvanie) VALUES
-      (1,1,'Camry'), (2,1,'Land Cruiser'), (3,2,'43118'), (4,3,'X5'), (5,4,'Sprinter')
+      (1,1,'Camry'), (2,1,'Land Cruiser'), (3,1,'Hilux'), (4,1,'Corolla'),
+      (5,2,'43118'), (6,2,'6520'), (7,2,'65115'), (8,2,'5490'),
+      (9,3,'X5'), (10,3,'X3'), (11,3,'320i'), (12,3,'530d'),
+      (13,4,'Sprinter'), (14,4,'Actros'), (15,4,'Atego'),
+      (16,5,'FH16'), (17,5,'FM'), (18,5,'FL'),
+      (19,6,'TGX'), (20,6,'TGS'), (21,6,'TGL'),
+      (22,7,'R500'), (23,7,'P440'), (24,7,'G410')
       ON CONFLICT (id) DO NOTHING
     `);
     await pool.query(`
       INSERT INTO transportnoe_sredstvo (id, model_id, gos_nomer, invent_nomer, probeg, tekuschee_sostoyanie) VALUES
       (1,1,'А123БВ777','INV-001', 45200, 'Исправно'),
-      (2,3,'К456НО199','INV-002', 128500, 'Требует ремонта'),
-      (3,4,'М789РС777','INV-003', 67300, 'Исправно')
+      (2,3,'А234ВГ888','INV-002', 128500, 'Требует ремонта'),
+      (3,5,'К456НО199','INV-003', 67300, 'Исправно'),
+      (4,9,'М789РС777','INV-004', 89100, 'Исправно'),
+      (5,13,'О012ТУ444','INV-005', 234000, 'В ремонте'),
+      (6,16,'А345БВ555','INV-006', 156000, 'Исправно'),
+      (7,5,'К567НО888','INV-007', 342000, 'Требует ремонта'),
+      (8,9,'М890РС999','INV-008', 78000, 'Исправно'),
+      (9,1,'А111БВ222','INV-009', 12000, 'Исправно'),
+      (10,3,'А222ВГ333','INV-010', 56700, 'Требует ремонта'),
+      (11,5,'К333НО444','INV-011', 189000, 'Исправно'),
+      (12,9,'М444РС555','INV-012', 23400, 'Исправно'),
+      (13,13,'О555ТУ666','INV-013', 312000, 'В ремонте'),
+      (14,16,'А666БВ777','INV-014', 89000, 'Исправно'),
+      (15,5,'К777НО888','INV-015', 445000, 'Требует ремонта')
       ON CONFLICT (id) DO NOTHING
     `);
     // Seed test users with plaintext passwords (login handler auto-migrates them to bcrypt on first login)
     await pool.query(`
       INSERT INTO sotrudnik (id, fio, login, parol_hash, rol_id, podrazdelenie_id) VALUES
-      (1,'Иванов А.А. (Админ)','admin','admin123',5,1),
-      (2,'Петров В.В. (Механик)','mechanic','mechanic123',3,1),
-      (3,'Сидоров Г.Г. (Главмех)','head','head123',4,1)
+      (1,'Иванов А.А.','admin','admin123',5,1),
+      (2,'Петров В.В.','mechanic1','mech123',3,1),
+      (3,'Сидоров Г.Г.','head1','head123',4,1),
+      (4,'Кузнецов Д.Д.','mechanic2','mech123',3,1),
+      (5,'Смирнов Е.Е.','mechanic3','mech123',3,1),
+      (6,'Васильев Ж.Ж.','mechanic4','mech123',3,1),
+      (7,'Попов З.З.','mechanic5','mech123',3,1),
+      (8,'Новиков И.И.','mechanic6','mech123',3,1),
+      (9,'Морозов К.К.','mechanic7','mech123',3,1),
+      (10,'Лебедев Л.Л.','mechanic8','mech123',3,1)
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO zayavka (id, data_sozdaniya, sozdatel_id, ts_id, tip_remonta_id, opisanie, status_id, prioritet, data_rezhima) VALUES
+      (1,NOW()-INTERVAL '14 days',3,2,2,'Течь масла из двигателя, нужна диагностика',1,2,NOW()),
+      (2,NOW()-INTERVAL '13 days',3,5,3,'Стук в передней подвеске',2,1,NOW()-INTERVAL '12 days'),
+      (3,NOW()-INTERVAL '12 days',3,7,1,'Плановое ТО 150000 км',3,1,NOW()-INTERVAL '10 days'),
+      (4,NOW()-INTERVAL '11 days',3,10,4,'Проверка электропроводки',1,3,NOW()),
+      (5,NOW()-INTERVAL '10 days',3,13,2,'Перегрев двигателя на трассе',2,2,NOW()-INTERVAL '9 days'),
+      (6,NOW()-INTERVAL '9 days',3,15,5,'Вмятина на правой двери',1,1,NOW()),
+      (7,NOW()-INTERVAL '8 days',3,1,6,'Замена масла и фильтров',3,1,NOW()-INTERVAL '7 days'),
+      (8,NOW()-INTERVAL '7 days',3,3,7,'Не работает стартер',2,3,NOW()-INTERVAL '6 days'),
+      (9,NOW()-INTERVAL '6 days',3,6,8,'Замена резины на зимнюю',3,1,NOW()-INTERVAL '5 days'),
+      (10,NOW()-INTERVAL '5 days',3,8,9,'Царапина на бампере',1,1,NOW()),
+      (11,NOW()-INTERVAL '4 days',3,11,10,'Проблемы с переключением передач',2,2,NOW()-INTERVAL '3 days'),
+      (12,NOW()-INTERVAL '3 days',3,4,2,'Дым из выхлопной трубы',1,3,NOW()),
+      (13,NOW()-INTERVAL '2 days',3,9,3,'Скрип в задней подвеске',1,2,NOW()),
+      (14,NOW()-INTERVAL '1 day',3,12,4,'Проверка АКБ и генератора',1,1,NOW()),
+      (15,NOW()-INTERVAL '1 day',3,14,1,'ТО 90000 км',1,1,NOW())
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO remont (id, zayavka_id, data_nachala, data_okonchaniya, mekhanik_id, glavniy_mekhanik_id, stoimost_rabot, stoimost_zapchastey) VALUES
+      (1,2,NOW()-INTERVAL '12 days',NOW()-INTERVAL '11 days',2,3,15000,8500),
+      (2,3,NOW()-INTERVAL '10 days',NOW()-INTERVAL '9 days',4,3,8000,12000),
+      (3,5,NOW()-INTERVAL '9 days',NULL,5,3,25000,18000),
+      (4,7,NOW()-INTERVAL '7 days',NOW()-INTERVAL '6 days',6,3,5000,3500),
+      (5,8,NOW()-INTERVAL '6 days',NULL,7,3,12000,4500),
+      (6,9,NOW()-INTERVAL '5 days',NOW()-INTERVAL '4 days',8,3,3000,28000),
+      (7,11,NOW()-INTERVAL '3 days',NULL,9,3,20000,15000),
+      (8,1,NOW()-INTERVAL '1 day',NULL,10,3,18000,12000),
+      (9,4,NOW()-INTERVAL '1 day',NULL,2,3,5000,0),
+      (10,6,NOW()-INTERVAL '1 day',NULL,4,3,8000,22000)
       ON CONFLICT (id) DO NOTHING
     `);
     console.log('seed data ready');
