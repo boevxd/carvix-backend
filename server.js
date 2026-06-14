@@ -236,6 +236,36 @@ async function initDB() {
       (1,'Основное')
       ON CONFLICT (id) DO NOTHING
     `);
+    await pool.query(`
+      INSERT INTO tip_remonta (id, nazvanie) VALUES
+      (1,'ТО'), (2,'Ремонт двигателя'), (3,'Ремонт ходовой'), (4,'Диагностика'), (5,'Покраска')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO marka (id, nazvanie) VALUES
+      (1,'Toyota'), (2,'KamAZ'), (3,'BMW'), (4,'Mercedes-Benz')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO model (id, marka_id, nazvanie) VALUES
+      (1,1,'Camry'), (2,1,'Land Cruiser'), (3,2,'43118'), (4,3,'X5'), (5,4,'Sprinter')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await pool.query(`
+      INSERT INTO transportnoe_sredstvo (id, model_id, gos_nomer, invent_nomer, probeg, tekuschee_sostoyanie) VALUES
+      (1,1,'А123БВ777','INV-001', 45200, 'Исправно'),
+      (2,3,'К456НО199','INV-002', 128500, 'Требует ремонта'),
+      (3,4,'М789РС777','INV-003', 67300, 'Исправно')
+      ON CONFLICT (id) DO NOTHING
+    `);
+    // Seed test users with plaintext passwords (login handler auto-migrates them to bcrypt on first login)
+    await pool.query(`
+      INSERT INTO sotrudnik (id, fio, login, parol_hash, rol_id, podrazdelenie_id) VALUES
+      (1,'Иванов А.А. (Админ)','admin','admin123',5,1),
+      (2,'Петров В.В. (Механик)','mechanic','mechanic123',3,1),
+      (3,'Сидоров Г.Г. (Главмех)','head','head123',4,1)
+      ON CONFLICT (id) DO NOTHING
+    `);
     console.log('seed data ready');
 
     await pool.query(`
