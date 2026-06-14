@@ -334,6 +334,11 @@ async function initDB() {
       (10,6,NOW()-INTERVAL '1 day',NULL,4,3,8000,22000)
       ON CONFLICT (id) DO NOTHING
     `);
+    // Reset sequences so future inserts get unique IDs
+    await pool.query(`SELECT setval('sotrudnik_id_seq', (SELECT MAX(id) FROM sotrudnik), true)`);
+    await pool.query(`SELECT setval('transportnoe_sredstvo_id_seq', (SELECT MAX(id) FROM transportnoe_sredstvo), true)`);
+    await pool.query(`SELECT setval('zayavka_id_seq', (SELECT MAX(id) FROM zayavka), true)`);
+    await pool.query(`SELECT setval('remont_id_seq', (SELECT MAX(id) FROM remont), true)`);
     console.log('seed data ready');
 
     await pool.query(`
