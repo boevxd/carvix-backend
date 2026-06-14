@@ -177,12 +177,18 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS transportnoe_sredstvo (
         id SERIAL PRIMARY KEY,
         model_id INTEGER REFERENCES model(id),
+        podrazdelenie_id INTEGER REFERENCES podrazdelenie(id),
         gos_nomer TEXT,
         invent_nomer TEXT,
         probeg INTEGER,
         tekuschee_sostoyanie TEXT
       )
     `);
+    // Migration: add podrazdelenie_id if table exists from old schema
+    try {
+      await pool.query(`ALTER TABLE transportnoe_sredstvo ADD COLUMN IF NOT EXISTS podrazdelenie_id INTEGER REFERENCES podrazdelenie(id)`);
+      await pool.query(`UPDATE transportnoe_sredstvo SET podrazdelenie_id = 1 WHERE podrazdelenie_id IS NULL`);
+    } catch (e) { /* ignore if already exists */ }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sotrudnik (
         id SERIAL PRIMARY KEY,
@@ -262,22 +268,22 @@ async function initDB() {
       ON CONFLICT (id) DO NOTHING
     `);
     await pool.query(`
-      INSERT INTO transportnoe_sredstvo (id, model_id, gos_nomer, invent_nomer, probeg, tekuschee_sostoyanie) VALUES
-      (1,1,'А123БВ777','INV-001', 45200, 'Исправно'),
-      (2,3,'А234ВГ888','INV-002', 128500, 'Требует ремонта'),
-      (3,5,'К456НО199','INV-003', 67300, 'Исправно'),
-      (4,9,'М789РС777','INV-004', 89100, 'Исправно'),
-      (5,13,'О012ТУ444','INV-005', 234000, 'В ремонте'),
-      (6,16,'А345БВ555','INV-006', 156000, 'Исправно'),
-      (7,5,'К567НО888','INV-007', 342000, 'Требует ремонта'),
-      (8,9,'М890РС999','INV-008', 78000, 'Исправно'),
-      (9,1,'А111БВ222','INV-009', 12000, 'Исправно'),
-      (10,3,'А222ВГ333','INV-010', 56700, 'Требует ремонта'),
-      (11,5,'К333НО444','INV-011', 189000, 'Исправно'),
-      (12,9,'М444РС555','INV-012', 23400, 'Исправно'),
-      (13,13,'О555ТУ666','INV-013', 312000, 'В ремонте'),
-      (14,16,'А666БВ777','INV-014', 89000, 'Исправно'),
-      (15,5,'К777НО888','INV-015', 445000, 'Требует ремонта')
+      INSERT INTO transportnoe_sredstvo (id, model_id, podrazdelenie_id, gos_nomer, invent_nomer, probeg, tekuschee_sostoyanie) VALUES
+      (1,1,1,'А123БВ777','INV-001', 45200, 'Исправно'),
+      (2,3,1,'А234ВГ888','INV-002', 128500, 'Требует ремонта'),
+      (3,5,1,'К456НО199','INV-003', 67300, 'Исправно'),
+      (4,9,1,'М789РС777','INV-004', 89100, 'Исправно'),
+      (5,13,1,'О012ТУ444','INV-005', 234000, 'В ремонте'),
+      (6,16,1,'А345БВ555','INV-006', 156000, 'Исправно'),
+      (7,5,1,'К567НО888','INV-007', 342000, 'Требует ремонта'),
+      (8,9,1,'М890РС999','INV-008', 78000, 'Исправно'),
+      (9,1,1,'А111БВ222','INV-009', 12000, 'Исправно'),
+      (10,3,1,'А222ВГ333','INV-010', 56700, 'Требует ремонта'),
+      (11,5,1,'К333НО444','INV-011', 189000, 'Исправно'),
+      (12,9,1,'М444РС555','INV-012', 23400, 'Исправно'),
+      (13,13,1,'О555ТУ666','INV-013', 312000, 'В ремонте'),
+      (14,16,1,'А666БВ777','INV-014', 89000, 'Исправно'),
+      (15,5,1,'К777НО888','INV-015', 445000, 'Требует ремонта')
       ON CONFLICT (id) DO NOTHING
     `);
     // Seed test users with plaintext passwords (login handler auto-migrates them to bcrypt on first login)
