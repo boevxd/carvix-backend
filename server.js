@@ -422,7 +422,7 @@ async function notify(recipientIds, tip, soobshenie, zayavkaId = null) {
 }
 
 async function getUsersByRole(...roles) {
-  const r = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = ANY($1)', [roles]);
+  const r = await pool.query('SELECT id FROM sotrudnik WHERE rol_id = ANY($1)', roles);
   return r.rows.map(row => row.id);
 }
 
